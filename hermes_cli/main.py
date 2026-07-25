@@ -674,6 +674,27 @@ def _apply_profile_override() -> None:
                 file=sys.stderr,
             )
             return
+
+        # Dispatcher workers carry task-scoped authority in HERMES_KANBAN_*.
+        # Preserve it for the dispatcher's own `-p <assignee>` bootstrap and
+        # same-profile CLI lifecycle calls, but never let an explicit profile
+        # switch inherit another profile's task/run/board authority.
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            if hermes_home_env:
+                switches_profile = (
+                    Path(hermes_home_env).expanduser().resolve()
+                    != Path(hermes_home).expanduser().resolve()
+                )
+            else:
+                inherited_profile = os.environ.get("HERMES_PROFILE", "").strip()
+                switches_profile = bool(inherited_profile) and (
+                    inherited_profile.casefold() != profile_name.casefold()
+                )
+            if switches_profile:
+                for env_name in tuple(os.environ):
+                    if env_name.startswith("HERMES_KANBAN_"):
+                        os.environ.pop(env_name, None)
+
         os.environ["HERMES_HOME"] = hermes_home
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0 and profile_index is not None:
