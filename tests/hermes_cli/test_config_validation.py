@@ -1,5 +1,11 @@
 """Tests for config.yaml structure validation (validate_config_structure)."""
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
 
 from hermes_cli.config import (
     DEFAULT_CONFIG,
@@ -8,6 +14,68 @@ from hermes_cli.config import (
     validate_config_structure,
     ConfigIssue,
 )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _run_config_check(hermes_home: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    env.pop("HERMES_PROFILE", None)
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(_REPO_ROOT), env.get("PYTHONPATH", "")) if part
+    )
+    return subprocess.run(
+        [sys.executable, "-m", "hermes_cli.main", "config", "check"],
+        cwd=_REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("config_yaml", "expected_path"),
+    [
+        ("toolsets:\n  '0': credential-value-that-must-not-appear\n", "toolsets"),
+        (
+            "platform_toolsets:\n"
+            "  cli:\n"
+            "    '0': credential-value-that-must-not-appear\n",
+            "platform_toolsets.cli",
+        ),
+    ],
+)
+def test_config_check_rejects_malformed_toolset_shapes_without_echoing_values(
+    tmp_path, config_yaml, expected_path
+):
+    (tmp_path / "config.yaml").write_text(config_yaml, encoding="utf-8")
+
+    result = _run_config_check(tmp_path)
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert expected_path in output
+    assert "list" in output
+    assert "credential-value-that-must-not-appear" not in output
+
+
+def test_config_check_keeps_well_formed_toolset_shapes_successful(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "toolsets:\n"
+        "  - kanban\n"
+        "platform_toolsets:\n"
+        "  cli:\n"
+        "    - kanban\n",
+        encoding="utf-8",
+    )
+
+    result = _run_config_check(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestCustomProvidersValidation:

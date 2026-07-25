@@ -5171,8 +5171,22 @@ def config_command(args):
             print()
             print(color(f"  {len(missing_config)} new config option(s) available", Colors.YELLOW))
             print("    Run 'hermes config migrate' to add them")
-        
+
+        structure_issues = validate_config_structure()
+        if structure_issues:
+            print()
+            print(color("  Structure:", Colors.BOLD))
+            for issue in structure_issues:
+                marker = "✗" if issue.severity == "error" else "⚠"
+                issue_color = Colors.RED if issue.severity == "error" else Colors.YELLOW
+                print(color(f"    {marker} {issue.message}", issue_color))
+                if issue.hint:
+                    for line in issue.hint.splitlines():
+                        print(color(f"      {line}", Colors.DIM))
+
         print()
+        if any(issue.severity == "error" for issue in structure_issues):
+            sys.exit(1)
     
     else:
         print(f"Unknown config command: {subcmd}")
