@@ -18,6 +18,7 @@ def _fresh_profile_process(
     *,
     current_profile: str,
     selected_profile: str,
+    current_home_alias: bool = False,
 ) -> dict[str, str]:
     """Import the real CLI bootstrap in a fresh process and report its env."""
     hermes_root = tmp_path / ".hermes"
@@ -25,12 +26,16 @@ def _fresh_profile_process(
     selected_home = hermes_root / "profiles" / selected_profile
     current_home.mkdir(parents=True)
     selected_home.mkdir(parents=True, exist_ok=True)
+    inherited_home = current_home
+    if current_home_alias:
+        inherited_home = tmp_path / "current-profile-home"
+        inherited_home.symlink_to(current_home, target_is_directory=True)
 
     env = dict(os.environ)
     env.update(
         {
             "HOME": str(tmp_path),
-            "HERMES_HOME": str(current_home),
+            "HERMES_HOME": str(inherited_home),
             "HERMES_PROFILE": current_profile,
             "HERMES_KANBAN_TASK": "t_parent",
             "HERMES_KANBAN_RUN_ID": "17",
@@ -145,3 +150,17 @@ def test_same_profile_cli_lifecycle_keeps_current_task_scope(tmp_path):
     assert observed["HERMES_KANBAN_DB"] == str(tmp_path / "parent-kanban.db")
     assert observed["HERMES_KANBAN_WORKSPACE"] == str(tmp_path / "parent-workspace")
     assert observed["HERMES_KANBAN_GOAL_MODE"] == "1"
+
+
+def test_same_profile_symlink_home_keeps_current_task_scope(tmp_path):
+    observed = _fresh_profile_process(
+        tmp_path,
+        current_profile="stackr",
+        selected_profile="stackr",
+        current_home_alias=True,
+    )
+
+    assert observed["HERMES_KANBAN_TASK"] == "t_parent"
+    assert observed["HERMES_KANBAN_RUN_ID"] == "17"
+    assert observed["HERMES_KANBAN_CLAIM_LOCK"] == "claim-parent"
+    assert observed["HERMES_KANBAN_BOARD"] == "parent-board"

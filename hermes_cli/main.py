@@ -611,7 +611,9 @@ def _apply_profile_override() -> None:
     if profile_name is not None:
         if os.environ.get("HERMES_KANBAN_TASK"):
             if hermes_home_env:
-                inherited_home = Path(hermes_home_env).expanduser()
+                # Resolve first so an alias outside ``profiles/`` still reveals
+                # the canonical profile directory used to derive the root.
+                inherited_home = Path(hermes_home_env).expanduser().resolve()
                 if inherited_home.parent.name == "profiles":
                     hermes_root = inherited_home.parent.parent
                 else:
