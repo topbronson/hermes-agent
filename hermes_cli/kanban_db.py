@@ -593,6 +593,25 @@ def _resolved_lifecycle_board(board: Optional[str]) -> Optional[str]:
     return None if resolved == DEFAULT_BOARD else resolved
 
 
+def _managed_board_slug_from_path(db_path: Path) -> Optional[str]:
+    """Infer a named-board identity from a canonical managed DB path."""
+    try:
+        path = Path(os.path.abspath(os.path.expanduser(str(db_path))))
+        managed_root = Path(os.path.abspath(str(boards_root())))
+        relative = path.relative_to(managed_root)
+    except (OSError, ValueError):
+        return None
+    if len(relative.parts) != 2 or relative.parts[1] != "kanban.db":
+        return None
+    try:
+        slug = _normalize_board_slug(relative.parts[0])
+    except ValueError:
+        return None
+    if not slug or slug == DEFAULT_BOARD:
+        return None
+    return slug
+
+
 def board_exists(board: Optional[str] = None) -> bool:
     """Return True if the board has persisted metadata or a DB on disk.
 
@@ -911,7 +930,7 @@ def create_board(
             default_workdir=default_workdir,
             project_id=project_id,
         )
-        init_db(db_path=kanban_db_path(board=normed))
+        _init_db_unlocked(db_path=kanban_db_path(board=normed))
         _clear_board_tombstone(normed)
         return meta
 
@@ -2430,7 +2449,11 @@ def connect(
     board: Optional[str] = None,
 ) -> sqlite3.Connection:
     """Open a board while serializing named-board lifecycle transitions."""
-    slug = _resolved_lifecycle_board(board) if db_path is None else None
+    slug = (
+        _managed_board_slug_from_path(db_path)
+        if db_path is not None
+        else _resolved_lifecycle_board(board)
+    )
     if slug:
         with _board_lifecycle_lock(slug):
             if _board_is_tombstoned(slug):
@@ -2501,7 +2524,10 @@ def _init_db_unlocked(
     # schema + migration pass unconditionally.
     with _INIT_LOCK:
         _INITIALIZED_PATHS.discard(resolved)
-    with contextlib.closing(connect(path)):
+    # Call the unlocked primitive: callers of this helper already hold the
+    # lifecycle lock when the path is canonical, and re-entering the
+    # cross-process flock can deadlock even though the thread lock is an RLock.
+    with contextlib.closing(_connect_unlocked(path)):
         pass
     return path
 
@@ -2512,7 +2538,11 @@ def init_db(
     board: Optional[str] = None,
 ) -> Path:
     """Initialize a board, rejecting stale access to archived named boards."""
-    slug = _resolved_lifecycle_board(board) if db_path is None else None
+    slug = (
+        _managed_board_slug_from_path(db_path)
+        if db_path is not None
+        else _resolved_lifecycle_board(board)
+    )
     if slug:
         with _board_lifecycle_lock(slug):
             if _board_is_tombstoned(slug):

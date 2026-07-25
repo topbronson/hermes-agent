@@ -54,6 +54,27 @@ def test_stale_connect_and_init_fail_closed(fresh_home):
     assert not db_path.exists()
 
 
+@pytest.mark.parametrize("operation", ["connect", "init_db"])
+@pytest.mark.parametrize("conflicting_board", [None, "current-board"])
+def test_explicit_archived_canonical_path_wins_board_resolution(
+    fresh_home, operation, conflicting_board,
+):
+    """A retired canonical path must not be reopened via ambient board state."""
+    kb.create_board("retired-target")
+    target_path = kb.kanban_db_path(board="retired-target")
+    kb.create_board("current-board")
+    kb.set_current_board("current-board")
+    kb.remove_board("retired-target")
+    kb._INITIALIZED_PATHS.clear()
+
+    with pytest.raises(kb.KanbanBoardArchivedError):
+        getattr(kb, operation)(target_path, board=conflicting_board)
+
+    assert not target_path.exists()
+    assert not Path(f"{target_path}-wal").exists()
+    assert not Path(f"{target_path}-shm").exists()
+
+
 def test_remove_is_serialized_and_only_one_wins(fresh_home):
     kb.create_board("two-removers")
     barrier = threading.Barrier(2)
