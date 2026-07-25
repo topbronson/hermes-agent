@@ -113,6 +113,39 @@ class TestConfigYamlRouting:
         assert config["toolsets"] == ["kanban"]
         assert isinstance(config["toolsets"], list)
 
+    @pytest.mark.parametrize(
+        "initial",
+        [
+            None,
+            "platform_toolsets:\n  cli:\n    0: old\n",
+            "platform_toolsets:\n  cli: old\n",
+            "platform_toolsets:\n  cli:\n    - old\n",
+        ],
+    )
+    def test_indexed_platform_cli_write_is_list_typed_for_all_repair_states(
+        self, _isolated_hermes_home, initial
+    ):
+        """The platform CLI indexed writer establishes a real list safely."""
+        if initial is not None:
+            (_isolated_hermes_home / "config.yaml").write_text(initial)
+
+        set_config_value("platform_toolsets.cli.0", "kanban")
+
+        import yaml
+
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["platform_toolsets"]["cli"] == ["kanban"]
+        assert isinstance(config["platform_toolsets"]["cli"], list)
+
+    def test_unrelated_nested_list_write_remains_strict(
+        self, _isolated_hermes_home
+    ):
+        """Only the reviewed list paths may grow an out-of-range indexed write."""
+        (_isolated_hermes_home / "config.yaml").write_text("custom:\n  values:\n    - old\n")
+
+        with pytest.raises(IndexError, match="out of range"):
+            set_config_value("custom.values.1", "new")
+
     def test_terminal_image_goes_to_config(self, _isolated_hermes_home):
         """TERMINAL_DOCKER_IMAGE doesn't match _API_KEY or _TOKEN, so config.yaml."""
         set_config_value("terminal.docker_image", "python:3.12")

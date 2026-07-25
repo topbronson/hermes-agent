@@ -981,7 +981,10 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     return missing
 
 
-_LIST_VALUED_INDEXED_ROOTS = {"toolsets"}
+_LIST_VALUED_INDEXED_PATHS = {
+    ("toolsets",),
+    ("platform_toolsets", "cli"),
+}
 
 
 def _set_nested(config, dotted_key: str, value):
@@ -993,8 +996,8 @@ def _set_nested(config, dotted_key: str, value):
       _set_nested(c, "providers.1", "x") → c["providers"][1] = "x"
 
     Intermediate dicts are created on demand.  List indices are parsed
-    from numeric path segments.  The supported list-valued roots in
-    ``_LIST_VALUED_INDEXED_ROOTS`` are initialized/repaired as lists when an
+    from numeric path segments.  The supported list-valued indexed paths in
+    ``_LIST_VALUED_INDEXED_PATHS`` are initialized/repaired as lists when an
     indexed write is requested, including a missing or malformed mapping node;
     the target list grows to the requested index.  Other list navigation keeps
     the existing strict behavior.  If a segment targets a non-container leaf
@@ -1010,6 +1013,7 @@ def _set_nested(config, dotted_key: str, value):
     """
     parts = dotted_key.split(".")
     current = config
+    current_path = []
     for position, part in enumerate(parts[:-1]):
         if isinstance(current, list):
             try:
@@ -1020,11 +1024,12 @@ def _set_nested(config, dotted_key: str, value):
                     f"segment {part!r} is not a numeric index"
                 )
             current = current[idx]
+            current_path = [*current_path, part]
         elif isinstance(current, dict):
+            candidate_path = tuple([*current_path, part])
             existing = current.get(part)
             if (
-                current is config
-                and part in _LIST_VALUED_INDEXED_ROOTS
+                candidate_path in _LIST_VALUED_INDEXED_PATHS
                 and parts[position + 1].isdigit()
                 and not isinstance(existing, list)
             ):
@@ -1034,6 +1039,7 @@ def _set_nested(config, dotted_key: str, value):
             if part not in current or not isinstance(existing, (dict, list)):
                 current[part] = {}
             current = current[part]
+            current_path = [*current_path, part]
         else:
             raise TypeError(
                 f"Cannot navigate into {type(current).__name__} at key {dotted_key!r}"
@@ -1042,7 +1048,7 @@ def _set_nested(config, dotted_key: str, value):
     if isinstance(current, list):
         index = int(last)
         if index >= len(current):
-            if current is config.get("toolsets"):
+            if tuple(current_path) in _LIST_VALUED_INDEXED_PATHS:
                 current.extend([None] * (index + 1 - len(current)))
             else:
                 raise IndexError(
