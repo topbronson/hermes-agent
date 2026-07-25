@@ -97,6 +97,22 @@ class TestConfigYamlRouting:
         assert "model" not in _read_env(_isolated_hermes_home)
 
 
+    @pytest.mark.parametrize("initial", [None, "toolsets:\n  0: old\n", "toolsets:\n  - old\n"])
+    def test_indexed_toolsets_write_is_list_typed_for_all_repair_states(
+        self, _isolated_hermes_home, initial
+    ):
+        """The supported indexed writer repairs absent, mapping, and list nodes."""
+        if initial is not None:
+            (_isolated_hermes_home / "config.yaml").write_text(initial)
+
+        set_config_value("toolsets.0", "kanban")
+
+        import yaml
+
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["toolsets"] == ["kanban"]
+        assert isinstance(config["toolsets"], list)
+
     def test_terminal_image_goes_to_config(self, _isolated_hermes_home):
         """TERMINAL_DOCKER_IMAGE doesn't match _API_KEY or _TOKEN, so config.yaml."""
         set_config_value("terminal.docker_image", "python:3.12")

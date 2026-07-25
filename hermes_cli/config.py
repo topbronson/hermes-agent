@@ -981,6 +981,9 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     return missing
 
 
+_LIST_VALUED_INDEXED_ROOTS = {"toolsets"}
+
+
 def _set_nested(config, dotted_key: str, value):
     """Set a value at an arbitrarily nested dotted key path.
 
@@ -990,9 +993,11 @@ def _set_nested(config, dotted_key: str, value):
       _set_nested(c, "providers.1", "x") → c["providers"][1] = "x"
 
     Intermediate dicts are created on demand.  List indices are parsed
-    from numeric path segments; the referenced index must already exist
-    (we do not grow lists — the user is navigating into structure they
-    wrote themselves).  If a segment targets a non-container leaf
+    from numeric path segments.  The supported list-valued roots in
+    ``_LIST_VALUED_INDEXED_ROOTS`` are initialized/repaired as lists when an
+    indexed write is requested, including a missing or malformed mapping node;
+    the target list grows to the requested index.  Other list navigation keeps
+    the existing strict behavior.  If a segment targets a non-container leaf
     (scalar), the leaf is replaced with a fresh dict so the write can
     proceed — this preserves the pre-existing behavior for bare scalar
     overrides (e.g. setting ``a.b.c`` where ``a.b`` was previously a
@@ -1005,7 +1010,7 @@ def _set_nested(config, dotted_key: str, value):
     """
     parts = dotted_key.split(".")
     current = config
-    for part in parts[:-1]:
+    for position, part in enumerate(parts[:-1]):
         if isinstance(current, list):
             try:
                 idx = int(part)
@@ -1017,6 +1022,14 @@ def _set_nested(config, dotted_key: str, value):
             current = current[idx]
         elif isinstance(current, dict):
             existing = current.get(part)
+            if (
+                current is config
+                and part in _LIST_VALUED_INDEXED_ROOTS
+                and parts[position + 1].isdigit()
+                and not isinstance(existing, list)
+            ):
+                current[part] = []
+                existing = current[part]
             # Preserve dicts and lists; replace missing/scalar with a fresh dict.
             if part not in current or not isinstance(existing, (dict, list)):
                 current[part] = {}
@@ -1027,7 +1040,15 @@ def _set_nested(config, dotted_key: str, value):
             )
     last = parts[-1]
     if isinstance(current, list):
-        current[int(last)] = value
+        index = int(last)
+        if index >= len(current):
+            if current is config.get("toolsets"):
+                current.extend([None] * (index + 1 - len(current)))
+            else:
+                raise IndexError(
+                    f"List index {index} is out of range for key {dotted_key!r}"
+                )
+        current[index] = value
     else:
         current[last] = value
 
