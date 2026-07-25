@@ -71,6 +71,7 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -81,6 +82,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import logging
 import time
@@ -524,6 +526,73 @@ def board_dir(board: Optional[str] = None) -> Path:
     return boards_root() / slug
 
 
+def _board_tombstone_path(slug: str) -> Path:
+    """Return the durable marker that prevents stale board resurrection."""
+    return boards_root() / "_archived" / ".tombstones" / slug
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist directory-entry changes on supported POSIX filesystems."""
+    if _IS_WINDOWS:
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            return
+        raise
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_board_tombstone(slug: str, archive_path: Path) -> None:
+    path = _board_tombstone_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_directory(path.parent.parent.parent)
+    payload = json.dumps({"slug": slug, "archive_path": str(archive_path), "archived_at": int(time.time())}) + "\n"
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        _fsync_directory(path.parent)
+        _fsync_directory(path.parent.parent)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _clear_board_tombstone(slug: str) -> None:
+    path = _board_tombstone_path(slug)
+    try:
+        path.unlink()
+        _fsync_directory(path.parent)
+    except FileNotFoundError:
+        pass
+
+
+def _board_is_tombstoned(slug: str) -> bool:
+    return slug != DEFAULT_BOARD and _board_tombstone_path(slug).is_file()
+
+
+def _resolved_lifecycle_board(board: Optional[str]) -> Optional[str]:
+    requested = _normalize_board_slug(board)
+    if requested:
+        return requested
+    pinned = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+    if pinned and os.environ.get("HERMES_KANBAN_DB", "").strip():
+        try:
+            return _normalize_board_slug(pinned)
+        except ValueError:
+            return None
+    resolved = get_current_board()
+    return None if resolved == DEFAULT_BOARD else resolved
+
+
 def board_exists(board: Optional[str] = None) -> bool:
     """Return True if the board has persisted metadata or a DB on disk.
 
@@ -561,6 +630,71 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     if slug == DEFAULT_BOARD:
         return kanban_home() / "kanban.db"
     return board_dir(slug) / "kanban.db"
+
+
+class _RetryingSnapshotConnection:
+    """Retry one transient query failure against a freshly copied snapshot."""
+
+    def __init__(self, connection, reopen):
+        self._connection = connection
+        self._reopen = reopen
+        self._retried = False
+
+    def execute(self, *args, **kwargs):
+        try:
+            return self._connection.execute(*args, **kwargs)
+        except sqlite3.DatabaseError:
+            if self._retried:
+                raise
+            self._retried = True
+            self._connection.close()
+            self._connection = self._reopen()
+            return self._connection.execute(*args, **kwargs)
+
+    def close(self):
+        self._connection.close()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+@contextlib.contextmanager
+def read_only_snapshot(db_path: Path):
+    """Yield a consistent read-only copy without touching source files.
+
+    Copy the sidecars before the main database.  If a concurrent checkpoint
+    resets the WAL after the sidecars are copied, SQLite rejects the stale
+    WAL salt against the newly copied database and reads the checkpointed DB;
+    it can never apply a post-copy WAL to an older database image.  The
+    temporary database is opened read-only, so no source DB/WAL/SHM file is
+    created or modified.
+    """
+    source = Path(db_path)
+    with tempfile.TemporaryDirectory(prefix="hermes-kanban-read-") as tmp:
+        snapshot = Path(tmp) / source.name
+
+        def open_snapshot():
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{snapshot}{suffix}").unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{source}{suffix}")
+                if sidecar.exists():
+                    shutil.copyfile(sidecar, Path(f"{snapshot}{suffix}"))
+            shutil.copyfile(source, snapshot)
+            uri = f"file:{snapshot.resolve()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        try:
+            initial = open_snapshot()
+        except sqlite3.DatabaseError:
+            initial = open_snapshot()
+        conn = _RetryingSnapshotConnection(initial, open_snapshot)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
 
 def workspaces_root(board: Optional[str] = None) -> Path:
@@ -767,18 +901,19 @@ def create_board(
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
-    meta = write_board_metadata(
-        normed,
-        name=name,
-        description=description,
-        icon=icon,
-        color=color,
-        default_workdir=default_workdir,
-        project_id=project_id,
-    )
-    # Touch the DB so list_boards() sees it immediately.
-    init_db(board=normed)
-    return meta
+    with _board_lifecycle_lock(normed):
+        meta = write_board_metadata(
+            normed,
+            name=name,
+            description=description,
+            icon=icon,
+            color=color,
+            default_workdir=default_workdir,
+            project_id=project_id,
+        )
+        init_db(db_path=kanban_db_path(board=normed))
+        _clear_board_tombstone(normed)
+        return meta
 
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:
@@ -830,7 +965,7 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
 
     ``archive=True`` (default) moves the board's directory to
     ``<root>/kanban/boards/_archived/<slug>-<timestamp>/`` so the data
-    is recoverable. ``archive=False`` deletes the directory outright.
+    is recoverable. Hard deletion is intentionally unsupported.
 
     The ``default`` board cannot be removed — raises :class:`ValueError`.
     Returns a summary dict describing what happened (``{"slug", "action",
@@ -842,35 +977,63 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         raise ValueError("board slug is required")
     if normed == DEFAULT_BOARD:
         raise ValueError("the 'default' board cannot be removed")
-    d = board_dir(normed)
-    if not d.exists():
-        raise ValueError(f"board {normed!r} does not exist")
-
-    # If the user removed the currently-active board, revert to default.
-    if get_current_board() == normed:
-        clear_current_board()
-
-    # A concurrent connect(board=normed) after the rename/delete recreates
-    # an empty sqlite file via mkdir(exist_ok=True); the cache entry must be
-    # dropped first so the schema init pass re-runs on that fresh file.
-    _INITIALIZED_PATHS.discard(str((d / "kanban.db").resolve()))
-
-    if archive:
+    if not archive:
+        raise ValueError("hard deletion is unsupported; boards are archived recoverably")
+    with _board_lifecycle_lock(normed):
+        d = board_dir(normed)
+        if not d.exists():
+            raise ValueError(f"board {normed!r} does not exist")
+        if get_current_board() == normed:
+            clear_current_board()
+        _INITIALIZED_PATHS.discard(str((d / "kanban.db").resolve()))
         archive_root = boards_root() / "_archived"
         archive_root.mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
         target = archive_root / f"{normed}-{ts}"
-        # Avoid collision on rapid double-archives.
         suffix = 1
         while target.exists():
             target = archive_root / f"{normed}-{ts}-{suffix}"
             suffix += 1
-        d.rename(target)
+        renamed = False
+        try:
+            _write_board_tombstone(normed, target)
+            db = d / "kanban.db"
+            if db.exists():
+                with contextlib.suppress(sqlite3.Error):
+                    with sqlite3.connect(str(db), timeout=1.0) as conn:
+                        conn.execute("PRAGMA wal_checkpoint(FULL)")
+            d.rename(target)
+            renamed = True
+            _fsync_directory(d.parent)
+            _fsync_directory(target.parent)
+        except Exception:
+            if not renamed:
+                with contextlib.suppress(OSError):
+                    _clear_board_tombstone(normed)
+            raise
         return {"slug": normed, "action": "archived", "new_path": str(target)}
-    else:
-        import shutil
-        shutil.rmtree(d)
-        return {"slug": normed, "action": "deleted", "new_path": ""}
+
+
+def recover_board(slug: str, archive_path: Path) -> dict:
+    """Restore one timestamped archive without deleting the archive history."""
+    normed = _normalize_board_slug(slug)
+    if not normed or normed == DEFAULT_BOARD:
+        raise ValueError("only archived named boards can be recovered")
+    source = archive_path.expanduser().resolve()
+    archive_root = (boards_root() / "_archived").resolve()
+    if source.parent != archive_root or not source.name.startswith(f"{normed}-"):
+        raise ValueError("archive path is not a matching board archive")
+    with _board_lifecycle_lock(normed):
+        destination = board_dir(normed)
+        if destination.exists():
+            raise ValueError(f"board {normed!r} already exists")
+        if not source.is_dir() or not (source / "kanban.db").exists():
+            raise ValueError("archive does not contain a kanban database")
+        shutil.copytree(source, destination)
+        _fsync_directory(destination.parent)
+        _clear_board_tombstone(normed)
+        _INITIALIZED_PATHS.discard(str((destination / "kanban.db").resolve()))
+        return {"slug": normed, "action": "recovered", "path": str(destination)}
 
 
 # ---------------------------------------------------------------------------
@@ -1361,6 +1524,49 @@ _CORRUPT_BACKUP_RETENTION = 10
 # lock (the in-process _INIT_LOCK + idempotent init remain the backstop).
 _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 _INIT_LOCK_POLL_SECONDS = 0.05
+_BOARD_LIFECYCLE_LOCKS: dict[str, threading.RLock] = {}
+_BOARD_LIFECYCLE_LOCKS_GUARD = threading.Lock()
+
+
+class KanbanBoardArchivedError(RuntimeError):
+    """Raised when a stale caller tries to reopen an archived named board."""
+
+
+@contextlib.contextmanager
+def _board_lifecycle_lock(slug: str):
+    """Serialize named-board connect/init/create/archive transitions."""
+    with _BOARD_LIFECYCLE_LOCKS_GUARD:
+        lock = _BOARD_LIFECYCLE_LOCKS.setdefault(slug, threading.RLock())
+    lock.acquire()
+    handle = None
+    acquired = False
+    try:
+        lock_path = board_dir(slug).parent / f".{slug}.lifecycle.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+        if _IS_WINDOWS:
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        acquired = True
+        yield
+    finally:
+        if handle is not None:
+            try:
+                if acquired:
+                    if _IS_WINDOWS:
+                        import msvcrt
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+        lock.release()
 
 
 def _resolve_busy_timeout_ms() -> int:
@@ -2106,7 +2312,7 @@ def repair_db(
         )
 
 
-def connect(
+def _connect_unlocked(
     db_path: Optional[Path] = None,
     *,
     board: Optional[str] = None,
@@ -2218,6 +2424,23 @@ def connect(
     return conn
 
 
+def connect(
+    db_path: Optional[Path] = None,
+    *,
+    board: Optional[str] = None,
+) -> sqlite3.Connection:
+    """Open a board while serializing named-board lifecycle transitions."""
+    slug = _resolved_lifecycle_board(board) if db_path is None else None
+    if slug:
+        with _board_lifecycle_lock(slug):
+            if _board_is_tombstoned(slug):
+                raise KanbanBoardArchivedError(
+                    f"kanban board {slug!r} is archived; use explicit create/recover"
+                )
+            return _connect_unlocked(db_path=db_path, board=board)
+    return _connect_unlocked(db_path=db_path, board=board)
+
+
 @contextlib.contextmanager
 def connect_closing(
     db_path: Optional[Path] = None,
@@ -2253,7 +2476,7 @@ def connect_closing(
             pass
 
 
-def init_db(
+def _init_db_unlocked(
     db_path: Optional[Path] = None,
     *,
     board: Optional[str] = None,
@@ -2281,6 +2504,23 @@ def init_db(
     with contextlib.closing(connect(path)):
         pass
     return path
+
+
+def init_db(
+    db_path: Optional[Path] = None,
+    *,
+    board: Optional[str] = None,
+) -> Path:
+    """Initialize a board, rejecting stale access to archived named boards."""
+    slug = _resolved_lifecycle_board(board) if db_path is None else None
+    if slug:
+        with _board_lifecycle_lock(slug):
+            if _board_is_tombstoned(slug):
+                raise KanbanBoardArchivedError(
+                    f"kanban board {slug!r} is archived; use explicit create/recover"
+                )
+            return _init_db_unlocked(db_path=db_path, board=board)
+    return _init_db_unlocked(db_path=db_path, board=board)
 
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:

@@ -92,6 +92,83 @@ def test_workers_active_empty_board(client):
     assert "checked_at" in body
 
 
+def test_boards_counts_include_open_wal_without_mutating_sidecars(client):
+    """Dashboard board counts must see committed WAL rows via a side-effect-free read."""
+    path = kb.kanban_db_path()
+    writer = kb.connect()
+    try:
+        kb.create_task(writer, title="dashboard-wal", assignee="alice")
+        sidecars = {
+            suffix: Path(f"{path}{suffix}").read_bytes()
+            for suffix in ("-wal", "-shm")
+            if Path(f"{path}{suffix}").exists()
+        }
+        response = client.get("/api/plugins/kanban/boards")
+        assert response.status_code == 200
+        board = next(item for item in response.json()["boards"] if item["slug"] == "default")
+        assert board["counts"] == {"ready": 1}
+        assert {
+            suffix: Path(f"{path}{suffix}").read_bytes()
+            for suffix in sidecars
+        } == sidecars
+    finally:
+        writer.close()
+
+
+def test_workers_active_with_running_task(client):
+    """A running task with an open run row and worker_pid appears in the list."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="active-worker", assignee="alice")
+        conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?", (task_id,),
+        )
+        _insert_run(conn, task_id, worker_pid=12345)
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/workers/active")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    w = body["workers"][0]
+    assert w["task_id"] == task_id
+    assert w["worker_pid"] == 12345
+    assert w["task_status"] == "running"
+    assert w["task_title"] == "active-worker"
+    assert w["task_assignee"] == "alice"
+
+
+def test_workers_active_excludes_ended_runs(client):
+    """Runs with ended_at set are excluded even if task is running."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="ended-run", assignee="bob")
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        _insert_run(conn, task_id, worker_pid=99999, ended_at=int(time.time()) - 60)
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/workers/active")
+    assert r.status_code == 200
+    assert r.json()["count"] == 0
+
+
+def test_workers_active_excludes_runs_without_pid(client):
+    """Runs with no worker_pid are not considered active workers."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="no-pid", assignee="carol")
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        _insert_run(conn, task_id, worker_pid=None)
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/workers/active")
+    assert r.status_code == 200
+    assert r.json()["count"] == 0
+
+
 # ---------------------------------------------------------------------------
 # GET /runs/{run_id}
 # ---------------------------------------------------------------------------

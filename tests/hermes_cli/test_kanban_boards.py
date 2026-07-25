@@ -142,10 +142,16 @@ class TestBoardCRUD:
 
 
 
+    def test_remove_hard_delete_is_rejected(self, fresh_home):
+        kb.create_board("nuke")
+        d = kb.board_dir("nuke")
+        assert d.exists()
+        with pytest.raises(ValueError, match="hard deletion"):
+            kb.remove_board("nuke", archive=False)
+        assert d.exists()
 
 
-    @pytest.mark.parametrize("archive", [True, False])
-    def test_remove_clears_init_cache_for_recreated_db(self, fresh_home, archive):
+    def test_remove_clears_init_cache_for_recreated_db(self, fresh_home):
         # Regression for #23833: poll loops that call connect(board=slug) right
         # after remove_board() recreate an empty kanban.db at the same path
         # (connect() does mkdir(exist_ok=True)). If _INITIALIZED_PATHS still
@@ -158,13 +164,13 @@ class TestBoardCRUD:
         db_path = kb.board_dir("recycle") / "kanban.db"
         assert str(db_path.resolve()) in kb._INITIALIZED_PATHS
 
-        kb.remove_board("recycle", archive=archive)
+        kb.remove_board("recycle")
         # remove_board must drop the cache entry so a re-create through
         # connect() gets a fresh schema-init pass.
         assert str(db_path.resolve()) not in kb._INITIALIZED_PATHS
 
-        # Simulate the event-stream poll: re-open the same slug. connect()
-        # recreates the directory + empty .db; the schema must be re-applied.
+        # Explicit recreation is required after archive; stale pollers must fail closed.
+        kb.create_board("recycle")
         with kb.connect(board="recycle") as conn:
             tables = {
                 row[0]

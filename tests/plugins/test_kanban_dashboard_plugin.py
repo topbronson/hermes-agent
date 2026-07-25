@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -113,6 +114,133 @@ def test_create_task_appears_on_board(client):
     assert ready["tasks"][0]["id"] == task_id
     assert "acme" in data["tenants"]
     assert "researcher" in data["assignees"]
+
+
+def test_board_counts_survive_checkpoint_between_snapshot_parts(client, kanban_home, monkeypatch):
+    writer = kb.connect()
+    path = kb.kanban_db_path()
+    try:
+        kb.create_task(writer, title="checkpoint-task", assignee="dev")
+        original_copyfile = kb.shutil.copyfile
+        checkpointed_between_parts = False
+
+        def copyfile_with_checkpoint(source, destination, *args, **kwargs):
+            nonlocal checkpointed_between_parts
+            result = original_copyfile(source, destination, *args, **kwargs)
+            if Path(source) == Path(f"{path}-wal") and not checkpointed_between_parts:
+                checkpointed_between_parts = True
+                writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return result
+
+        monkeypatch.setattr(kb.shutil, "copyfile", copyfile_with_checkpoint)
+        response = client.get("/api/plugins/kanban/boards")
+        assert response.status_code == 200
+        board = next(item for item in response.json()["boards"] if item["slug"] == "default")
+        assert board["counts"] == {"ready": 1}
+        assert checkpointed_between_parts
+    finally:
+        writer.close()
+
+
+def test_board_counts_retry_first_snapshot_query_database_error(client, monkeypatch):
+    writer = kb.connect()
+    try:
+        kb.create_task(writer, title="retry-task", assignee="dev")
+        real_connect = kb.sqlite3.connect
+        failed = False
+
+        class FlakyConnection:
+            def __init__(self, connection):
+                self._connection = connection
+
+            @property
+            def row_factory(self):
+                return self._connection.row_factory
+
+            @row_factory.setter
+            def row_factory(self, value):
+                self._connection.row_factory = value
+
+            def execute(self, *args, **kwargs):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise sqlite3.DatabaseError("transient snapshot query")
+                return self._connection.execute(*args, **kwargs)
+
+            def close(self):
+                self._connection.close()
+
+        def flaky_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            return FlakyConnection(connection) if kwargs.get("uri") else connection
+
+        monkeypatch.setattr(kb.sqlite3, "connect", flaky_connect)
+        response = client.get("/api/plugins/kanban/boards")
+        assert response.status_code == 200
+        board = next(item for item in response.json()["boards"] if item["slug"] == "default")
+        assert board["counts"] == {"ready": 1}
+        assert failed
+    finally:
+        writer.close()
+
+
+def test_board_list_recommends_persistent_workspace_for_configured_workdir(
+    client, tmp_path
+):
+    """Board metadata should tell the UI which safe task default to use."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    kb.write_board_metadata("default", default_workdir=str(repo))
+
+    plain_dir = tmp_path / "notes"
+    plain_dir.mkdir()
+    kb.create_board("notes", default_workdir=str(plain_dir))
+    kb.create_board("disposable")
+
+    response = client.get("/api/plugins/kanban/boards")
+
+    assert response.status_code == 200
+    boards = {board["slug"]: board for board in response.json()["boards"]}
+    assert boards["default"]["default_workspace_kind"] == "worktree"
+    assert boards["notes"]["default_workspace_kind"] == "dir"
+    assert boards["disposable"]["default_workspace_kind"] == "scratch"
+
+
+def test_create_board_persists_project_directory(client, tmp_path):
+    """The dashboard board form should anchor future tasks to its project."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    response = client.post(
+        "/api/plugins/kanban/boards",
+        json={
+            "slug": "project-board",
+            "name": "Project Board",
+            "default_workdir": str(project_dir),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    board = response.json()["board"]
+    assert board["default_workdir"] == str(project_dir.resolve())
+    assert board["default_workspace_kind"] == "dir"
+    assert kb.read_board_metadata("project-board")["default_workdir"] == str(
+        project_dir.resolve()
+    )
+
+
+@pytest.mark.parametrize("path", ["relative/project", "~/missing-project"])
+def test_create_board_rejects_invalid_project_directory(client, path):
+    """A board must not persist a path that cannot anchor worker output."""
+    response = client.post(
+        "/api/plugins/kanban/boards",
+        json={"slug": "invalid-project", "default_workdir": path},
+    )
+
+    assert response.status_code == 400
+    assert "project directory" in response.json()["detail"].lower()
 
 
 def test_patch_board_sets_project_directory(client, tmp_path):

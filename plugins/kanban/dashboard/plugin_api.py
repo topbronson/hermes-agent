@@ -2266,14 +2266,11 @@ def _board_counts(slug: str) -> dict[str, int]:
         path = kanban_db.kanban_db_path(board=slug)
         if not path.exists():
             return {}
-        conn = kanban_db.connect(board=slug)
-        try:
+        with kanban_db.read_only_snapshot(path) as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
             ).fetchall()
             return {r["status"]: int(r["n"]) for r in rows}
-        finally:
-            conn.close()
     except Exception:
         return {}
 
