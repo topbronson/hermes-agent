@@ -428,55 +428,6 @@ from pathlib import Path
 from typing import Optional
 
 
-import functools as _functools
-
-from hermes_cli.sessions_cmd import cmd_sessions  # noqa: F401
-from hermes_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
-from hermes_cli.subcommands.cron import build_cron_parser
-from hermes_cli.subcommands.sync import build_sync_parser
-from hermes_cli.subcommands.gateway import build_gateway_parser
-from hermes_cli.subcommands.profile import build_profile_parser
-from hermes_cli.subcommands.model import build_model_parser
-from hermes_cli.subcommands.setup import build_setup_parser
-
-from hermes_cli.subcommands.whatsapp import build_whatsapp_parser
-from hermes_cli.subcommands.slack import build_slack_parser
-from hermes_cli.subcommands.login import build_login_parser
-from hermes_cli.subcommands.logout import build_logout_parser
-from hermes_cli.subcommands.auth import build_auth_parser
-from hermes_cli.subcommands.status import build_status_parser
-from hermes_cli.subcommands.webhook import build_webhook_parser
-from hermes_cli.subcommands.hooks import build_hooks_parser
-from hermes_cli.subcommands.doctor import build_doctor_parser
-from hermes_cli.subcommands.security import build_security_parser
-from hermes_cli.subcommands.approvals import build_approvals_parser
-from hermes_cli.subcommands.dump import build_dump_parser
-from hermes_cli.subcommands.debug import build_debug_parser
-from hermes_cli.subcommands.backup import build_backup_parser
-from hermes_cli.subcommands.import_cmd import build_import_cmd_parser
-from hermes_cli.subcommands.import_agent import build_import_agent_parser
-from hermes_cli.subcommands.config import build_config_parser
-from hermes_cli.subcommands.skin import build_skin_parser
-from hermes_cli.subcommands.console import build_console_parser
-from hermes_cli.subcommands.version import build_version_parser
-from hermes_cli.subcommands.update import build_update_parser
-from hermes_cli.subcommands.uninstall import build_uninstall_parser
-from hermes_cli.subcommands.dashboard import build_dashboard_parser
-from hermes_cli.subcommands.gui import build_gui_parser
-from hermes_cli.subcommands.logs import build_logs_parser
-from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
-from hermes_cli.subcommands.memory import build_memory_parser
-from hermes_cli.subcommands.acp import build_acp_parser
-from hermes_cli.subcommands.tools import build_tools_parser
-from hermes_cli.subcommands.insights import build_insights_parser
-from hermes_cli.subcommands.monitoring import build_monitoring_parser
-from hermes_cli.subcommands.skills import build_skills_parser
-from hermes_cli.subcommands.pairing import build_pairing_parser
-from hermes_cli.subcommands.plugins import build_plugins_parser
-from hermes_cli.subcommands.mcp import build_mcp_parser
-from hermes_cli.subcommands.claw import build_claw_parser
-
-
 def _require_tty(command_name: str) -> None:
     """Exit with a clear error if stdin is not a terminal.
 
@@ -653,8 +604,35 @@ def _apply_profile_override() -> None:
         except (UnicodeDecodeError, OSError):
             pass  # corrupted file, skip
 
-    # 3. If we found a profile, resolve and set HERMES_HOME
+    # 3. If we found a profile, resolve and set HERMES_HOME. Dispatcher workers
+    # carry task-scoped authority in HERMES_KANBAN_*. Scrub it before importing
+    # hermes_cli.profiles (which imports agent.skill_utils) whenever selection
+    # crosses the inherited profile boundary.
     if profile_name is not None:
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            if hermes_home_env:
+                inherited_home = Path(hermes_home_env).expanduser()
+                if inherited_home.parent.name == "profiles":
+                    hermes_root = inherited_home.parent.parent
+                else:
+                    hermes_root = inherited_home
+                canonical_name = profile_name.strip().lower()
+                selected_home = (
+                    hermes_root
+                    if canonical_name == "default"
+                    else hermes_root / "profiles" / canonical_name
+                )
+                switches_profile = inherited_home.resolve() != selected_home.resolve()
+            else:
+                inherited_profile = os.environ.get("HERMES_PROFILE", "").strip()
+                switches_profile = bool(inherited_profile) and (
+                    inherited_profile.casefold() != profile_name.casefold()
+                )
+            if switches_profile:
+                for env_name in tuple(os.environ):
+                    if env_name.startswith("HERMES_KANBAN_"):
+                        os.environ.pop(env_name, None)
+
         try:
             from hermes_cli.profiles import resolve_profile_env
 
@@ -675,26 +653,6 @@ def _apply_profile_override() -> None:
             )
             return
 
-        # Dispatcher workers carry task-scoped authority in HERMES_KANBAN_*.
-        # Preserve it for the dispatcher's own `-p <assignee>` bootstrap and
-        # same-profile CLI lifecycle calls, but never let an explicit profile
-        # switch inherit another profile's task/run/board authority.
-        if os.environ.get("HERMES_KANBAN_TASK"):
-            if hermes_home_env:
-                switches_profile = (
-                    Path(hermes_home_env).expanduser().resolve()
-                    != Path(hermes_home).expanduser().resolve()
-                )
-            else:
-                inherited_profile = os.environ.get("HERMES_PROFILE", "").strip()
-                switches_profile = bool(inherited_profile) and (
-                    inherited_profile.casefold() != profile_name.casefold()
-                )
-            if switches_profile:
-                for env_name in tuple(os.environ):
-                    if env_name.startswith("HERMES_KANBAN_"):
-                        os.environ.pop(env_name, None)
-
         os.environ["HERMES_HOME"] = hermes_home
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0 and profile_index is not None:
@@ -703,6 +661,54 @@ def _apply_profile_override() -> None:
 
 
 _apply_profile_override()
+
+import functools as _functools
+
+from hermes_cli.sessions_cmd import cmd_sessions  # noqa: F401
+from hermes_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
+from hermes_cli.subcommands.cron import build_cron_parser
+from hermes_cli.subcommands.sync import build_sync_parser
+from hermes_cli.subcommands.gateway import build_gateway_parser
+from hermes_cli.subcommands.profile import build_profile_parser
+from hermes_cli.subcommands.model import build_model_parser
+from hermes_cli.subcommands.setup import build_setup_parser
+
+from hermes_cli.subcommands.whatsapp import build_whatsapp_parser
+from hermes_cli.subcommands.slack import build_slack_parser
+from hermes_cli.subcommands.login import build_login_parser
+from hermes_cli.subcommands.logout import build_logout_parser
+from hermes_cli.subcommands.auth import build_auth_parser
+from hermes_cli.subcommands.status import build_status_parser
+from hermes_cli.subcommands.webhook import build_webhook_parser
+from hermes_cli.subcommands.hooks import build_hooks_parser
+from hermes_cli.subcommands.doctor import build_doctor_parser
+from hermes_cli.subcommands.security import build_security_parser
+from hermes_cli.subcommands.approvals import build_approvals_parser
+from hermes_cli.subcommands.dump import build_dump_parser
+from hermes_cli.subcommands.debug import build_debug_parser
+from hermes_cli.subcommands.backup import build_backup_parser
+from hermes_cli.subcommands.import_cmd import build_import_cmd_parser
+from hermes_cli.subcommands.import_agent import build_import_agent_parser
+from hermes_cli.subcommands.config import build_config_parser
+from hermes_cli.subcommands.skin import build_skin_parser
+from hermes_cli.subcommands.console import build_console_parser
+from hermes_cli.subcommands.version import build_version_parser
+from hermes_cli.subcommands.update import build_update_parser
+from hermes_cli.subcommands.uninstall import build_uninstall_parser
+from hermes_cli.subcommands.dashboard import build_dashboard_parser
+from hermes_cli.subcommands.gui import build_gui_parser
+from hermes_cli.subcommands.logs import build_logs_parser
+from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
+from hermes_cli.subcommands.memory import build_memory_parser
+from hermes_cli.subcommands.acp import build_acp_parser
+from hermes_cli.subcommands.tools import build_tools_parser
+from hermes_cli.subcommands.insights import build_insights_parser
+from hermes_cli.subcommands.monitoring import build_monitoring_parser
+from hermes_cli.subcommands.skills import build_skills_parser
+from hermes_cli.subcommands.pairing import build_pairing_parser
+from hermes_cli.subcommands.plugins import build_plugins_parser
+from hermes_cli.subcommands.mcp import build_mcp_parser
+from hermes_cli.subcommands.claw import build_claw_parser
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.

@@ -42,12 +42,33 @@ def _fresh_profile_process(
         }
     )
     code = """
+import importlib.abc
 import json
 import os
 import sys
 
+
+class AuthorityImportSentinel(importlib.abc.MetaPathFinder):
+    observed = None
+
+    def find_spec(self, fullname, path, target=None):
+        if self.observed is None and (
+            fullname == "hermes_cli.profiles"
+            or fullname.startswith("hermes_cli.subcommands.")
+        ):
+            self.observed = {
+                key: value
+                for key, value in os.environ.items()
+                if key.startswith("HERMES_KANBAN_")
+            }
+        return None
+
+
+sentinel = AuthorityImportSentinel()
+sys.meta_path.insert(0, sentinel)
 sys.argv = ["hermes", "-p", sys.argv[1], "version"]
 import hermes_cli.main  # noqa: F401
+print("PROFILE_IMPORT_ENV=" + json.dumps(sentinel.observed, sort_keys=True))
 print("PROFILE_ENV=" + json.dumps({
     key: value
     for key, value in os.environ.items()
@@ -69,9 +90,25 @@ print("PROFILE_ENV=" + json.dumps({
         for line in result.stdout.splitlines()
         if line.startswith("PROFILE_ENV=")
     )
+    import_payload = next(
+        line.removeprefix("PROFILE_IMPORT_ENV=")
+        for line in result.stdout.splitlines()
+        if line.startswith("PROFILE_IMPORT_ENV=")
+    )
     observed = json.loads(payload)
+    observed["first_authority_sensitive_import"] = json.loads(import_payload)
     assert observed["HERMES_HOME"] == str(selected_home)
     return observed
+
+
+def test_cross_profile_cli_scrubs_authority_before_profile_or_subcommand_import(tmp_path):
+    observed = _fresh_profile_process(
+        tmp_path,
+        current_profile="klerik",
+        selected_profile="stackr",
+    )
+
+    assert observed["first_authority_sensitive_import"] == {}
 
 
 def test_cross_profile_cli_drops_inherited_kanban_worker_authority(tmp_path):
