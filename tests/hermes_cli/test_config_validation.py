@@ -127,6 +127,171 @@ class TestCustomProvidersValidation:
 
 
 
+class TestListValuedToolsetValidation:
+    """Toolset config paths written by index must remain YAML lists."""
+
+    def test_top_level_toolsets_mapping_is_rejected(self):
+        issues = validate_config_structure({
+            "toolsets": {"0": "kanban"},
+        })
+
+        errors = [issue for issue in issues if issue.severity == "error"]
+        assert any(
+            "toolsets" in issue.message
+            and "dict" in issue.message
+            and "list" in issue.message
+            for issue in errors
+        )
+
+    def test_top_level_toolsets_scalar_is_rejected(self):
+        issues = validate_config_structure({
+            "toolsets": "kanban",
+        })
+
+        errors = [issue for issue in issues if issue.severity == "error"]
+        assert any(
+            "toolsets" in issue.message
+            and "str" in issue.message
+            and "list" in issue.message
+            for issue in errors
+        )
+
+    def test_top_level_toolsets_list_is_accepted(self):
+        issues = validate_config_structure({
+            "toolsets": ["kanban", "kanban", "unknown-toolset"],
+        })
+
+        assert issues == []
+
+    def test_platform_cli_toolsets_mapping_is_rejected(self):
+        issues = validate_config_structure({
+            "platform_toolsets": {
+                "cli": {"0": "kanban"},
+            },
+        })
+
+        errors = [issue for issue in issues if issue.severity == "error"]
+        assert any(
+            "platform_toolsets.cli" in issue.message
+            and "dict" in issue.message
+            and "list" in issue.message
+            for issue in errors
+        )
+
+    def test_platform_cli_toolsets_scalar_is_rejected(self):
+        issues = validate_config_structure({
+            "platform_toolsets": {
+                "cli": "kanban",
+            },
+        })
+
+        errors = [issue for issue in issues if issue.severity == "error"]
+        assert any(
+            "platform_toolsets.cli" in issue.message
+            and "str" in issue.message
+            and "list" in issue.message
+            for issue in errors
+        )
+
+    def test_platform_cli_toolsets_list_is_accepted(self):
+        issues = validate_config_structure({
+            "platform_toolsets": {
+                "cli": ["kanban", "kanban", "unknown-toolset"],
+            },
+        })
+
+        assert issues == []
+
+    def test_malformed_toolset_values_are_not_echoed(self):
+        secret = "sk-live-do-not-print"
+        issues = validate_config_structure({
+            "toolsets": {"0": secret},
+            "platform_toolsets": {
+                "cli": {"0": secret},
+            },
+        })
+
+        rendered = "\n".join(
+            f"{issue.message}\n{issue.hint}"
+            for issue in issues
+        )
+        assert secret not in rendered
+
+
+class TestFallbackModelValidation:
+    """fallback_model should be a top-level dict with provider + model."""
+
+    def test_missing_provider(self):
+        issues = validate_config_structure({
+            "fallback_model": {"model": "anthropic/claude-sonnet-4"},
+        })
+        assert any("missing 'provider'" in i.message for i in issues)
+
+    def test_missing_model(self):
+        issues = validate_config_structure({
+            "fallback_model": {"provider": "openrouter"},
+        })
+        assert any("missing 'model'" in i.message for i in issues)
+
+    def test_valid_fallback(self):
+        issues = validate_config_structure({
+            "fallback_model": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4",
+            },
+        })
+        # Only fallback-related issues should be absent
+        fb_issues = [i for i in issues if "fallback" in i.message.lower()]
+        assert len(fb_issues) == 0
+
+    def test_non_dict_fallback(self):
+        issues = validate_config_structure({
+            "fallback_model": "openrouter:anthropic/claude-sonnet-4",
+        })
+        assert any("should be a dict" in i.message for i in issues)
+
+    def test_empty_fallback_dict_no_issues(self):
+        """Empty fallback_model dict means disabled — no warnings needed."""
+        issues = validate_config_structure({
+            "fallback_model": {},
+        })
+        fb_issues = [i for i in issues if "fallback" in i.message.lower()]
+        assert len(fb_issues) == 0
+
+    def test_valid_fallback_list(self):
+        """List-form fallback_model (chain) should validate when every entry has provider+model."""
+        issues = validate_config_structure({
+            "fallback_model": [
+                {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+                {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            ],
+        })
+        fb_issues = [i for i in issues if "fallback" in i.message.lower()]
+        assert len(fb_issues) == 0
+
+    def test_fallback_list_entry_missing_provider(self):
+        issues = validate_config_structure({
+            "fallback_model": [
+                {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+                {"model": "claude-sonnet-4-6"},
+            ],
+        })
+        assert any("fallback_model[1]" in i.message and "provider" in i.message for i in issues)
+
+    def test_fallback_list_entry_missing_model(self):
+        issues = validate_config_structure({
+            "fallback_model": [
+                {"provider": "openrouter"},
+            ],
+        })
+        assert any("fallback_model[0]" in i.message and "model" in i.message for i in issues)
+
+    def test_fallback_list_entry_not_a_dict(self):
+        issues = validate_config_structure({
+            "fallback_model": ["openrouter:anthropic/claude-sonnet-4"],
+        })
+        assert any("fallback_model[0]" in i.message and "should be a dict" in i.message for i in issues)
+
 
 class TestMissingModelSection:
     """Warn when custom_providers exists but model section is missing."""

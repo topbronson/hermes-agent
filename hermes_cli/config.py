@@ -1936,6 +1936,22 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
 
     issues: List[ConfigIssue] = []
 
+    # ── indexed toolset paths must remain lists ───────────────────────────
+    for path in _LIST_VALUED_INDEXED_PATHS:
+        value: Any = config
+        for part in path:
+            if not isinstance(value, dict) or part not in value:
+                break
+            value = value[part]
+        else:
+            if not isinstance(value, list):
+                dotted_path = ".".join(path)
+                issues.append(ConfigIssue(
+                    "error",
+                    f"{dotted_path} should be a list, got {type(value).__name__}",
+                    f"Use YAML list syntax for {dotted_path}",
+                ))
+
     # ── custom_providers must be a list, not a dict ──────────────────────
     cp = config.get("custom_providers")
     if cp is not None:
