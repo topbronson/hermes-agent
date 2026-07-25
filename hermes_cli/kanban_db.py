@@ -677,33 +677,67 @@ class _RetryingSnapshotConnection:
         return getattr(self._connection, name)
 
 
+def _snapshot_file_signature(source: Path) -> tuple[tuple[str, int, int, int], ...]:
+    """Return a cheap generation fingerprint for the database and sidecars."""
+    signature = []
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(f"{source}{suffix}")
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            signature.append((suffix, 0, 0, 0))
+        else:
+            signature.append((suffix, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(signature)
+
+
+def _copy_snapshot_parts(source: Path, snapshot: Path) -> None:
+    """Copy the database files in one attempt without opening the source."""
+    shutil.copyfile(source, snapshot)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{source}{suffix}")
+        if sidecar.exists():
+            shutil.copyfile(sidecar, Path(f"{snapshot}{suffix}"))
+
+
 @contextlib.contextmanager
 def read_only_snapshot(db_path: Path):
     """Yield a consistent read-only copy without touching source files.
 
-    Copy the sidecars before the main database.  If a concurrent checkpoint
-    resets the WAL after the sidecars are copied, SQLite rejects the stale
-    WAL salt against the newly copied database and reads the checkpointed DB;
-    it can never apply a post-copy WAL to an older database image.  The
-    temporary database is opened read-only, so no source DB/WAL/SHM file is
-    created or modified.
+    Copy the database and sidecars without opening the source, then compare a
+    generation fingerprint before and after each attempt.  A checkpoint/reset
+    that crosses the old copy boundary changes that fingerprint, so the mixed
+    files are discarded and copied again.  The temporary database is opened
+    read-only, so no source DB/WAL/SHM file is created or modified.
     """
     source = Path(db_path)
     with tempfile.TemporaryDirectory(prefix="hermes-kanban-read-") as tmp:
         snapshot = Path(tmp) / source.name
 
         def open_snapshot():
-            for suffix in ("", "-wal", "-shm"):
-                Path(f"{snapshot}{suffix}").unlink(missing_ok=True)
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(f"{source}{suffix}")
-                if sidecar.exists():
-                    shutil.copyfile(sidecar, Path(f"{snapshot}{suffix}"))
-            shutil.copyfile(source, snapshot)
-            uri = f"file:{snapshot.resolve()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
-            conn.row_factory = sqlite3.Row
-            return conn
+            last_error = None
+            for _ in range(3):
+                for suffix in ("", "-wal", "-shm"):
+                    Path(f"{snapshot}{suffix}").unlink(missing_ok=True)
+                before = _snapshot_file_signature(source)
+                try:
+                    _copy_snapshot_parts(source, snapshot)
+                    after = _snapshot_file_signature(source)
+                except (FileNotFoundError, OSError) as exc:
+                    last_error = exc
+                    continue
+                if before != after:
+                    continue
+                try:
+                    uri = f"file:{snapshot.resolve()}?mode=ro"
+                    conn = sqlite3.connect(uri, uri=True)
+                    conn.row_factory = sqlite3.Row
+                    return conn
+                except sqlite3.DatabaseError as exc:
+                    last_error = exc
+            if last_error is not None:
+                raise last_error
+            raise sqlite3.DatabaseError("database changed while taking read-only snapshot")
 
         try:
             initial = open_snapshot()

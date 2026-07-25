@@ -206,6 +206,32 @@ def test_cli_counts_survive_checkpoint_between_snapshot_parts(fresh_home, monkey
         writer.close()
 
 
+def test_cli_counts_checkpoint_during_snapshot_copy(fresh_home, monkeypatch):
+    """A checkpoint at the old main/sidecar copy boundary cannot lose WAL rows."""
+    kb.create_board("backup-race")
+    path = kb.kanban_db_path(board="backup-race")
+    writer = kb.connect(board="backup-race")
+    try:
+        kb.create_task(writer, title="backup-task", assignee="dev")
+        original_copy = kb._copy_snapshot_parts
+        checkpointed = False
+
+        def copy_with_checkpoint(source, destination):
+            nonlocal checkpointed
+            result = original_copy(source, destination)
+            if not checkpointed:
+                writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                checkpointed = True
+            return result
+
+        monkeypatch.setattr(kb, "_copy_snapshot_parts", copy_with_checkpoint)
+        assert kanban_cli._board_task_counts("backup-race") == {"ready": 1}
+        assert checkpointed
+        assert path.exists()
+    finally:
+        writer.close()
+
+
 def test_cli_counts_retry_first_snapshot_query_database_error(fresh_home, monkeypatch):
     kb.create_board("query-retry")
     writer = kb.connect(board="query-retry")
