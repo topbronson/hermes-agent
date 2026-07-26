@@ -77,6 +77,7 @@ class GatewayAuthorizationMixin:
         if not platform:
             return None
         profile_name = (profile or "").strip() or None
+        adapters = getattr(self, "adapters", None) or {}
         if profile_name and profile_name != "default":
             active_profile = None
             active_profile_fn = getattr(self, "_active_profile_name", None)
@@ -91,6 +92,17 @@ class GatewayAuthorizationMixin:
             profile_adapters = getattr(self, "_profile_adapters", None) or {}
             if profile_name in profile_adapters:
                 return profile_adapters[profile_name].get(platform)
+            # The active non-default profile's adapters remain in the primary
+            # ``self.adapters`` map; only secondary profiles are kept in
+            # ``_profile_adapters``. Treating every non-default profile as
+            # secondary makes a gateway launched with HERMES_HOME pointing at
+            # (for example) ``profiles/queri`` fail closed and rewind every
+            # notifier claim before delivery.
+            try:
+                if profile_name == self._active_profile_name():
+                    return adapters.get(platform)
+            except Exception:
+                pass
             # Fail closed: a stamped secondary profile with no registry entry
             # (e.g. its adapter failed to connect) must NOT fall back to the
             # default profile's adapter — that sends replies out the wrong bot.
