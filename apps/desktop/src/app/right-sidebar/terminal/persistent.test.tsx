@@ -123,6 +123,17 @@ function Harness() {
   )
 }
 
+function HiddenPaneHarness() {
+  return (
+    <>
+      <div data-pane-hidden="">
+        <TerminalSlot className="slot" />
+      </div>
+      <PersistentTerminal onAddSelectionToChat={() => undefined} />
+    </>
+  )
+}
+
 describe('PersistentTerminal rect tracking', () => {
   beforeEach(() => {
     ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -202,6 +213,19 @@ describe('PersistentTerminal rect tracking', () => {
     })
 
     expect(raf.request).toHaveBeenCalledTimes(3)
+    expect(raf.pending()).toBe(0)
+  })
+
+  it('hides the fixed terminal overlay when its slot belongs to an inactive tab', () => {
+    const raf = installRaf()
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect(10, 20, 200, 100))
+
+    render(<HiddenPaneHarness />)
+
+    const overlay = container!.lastElementChild as HTMLElement
+
+    expect(overlay.style.visibility).toBe('hidden')
+    expect(overlay.style.pointerEvents).toBe('none')
     expect(raf.pending()).toBe(0)
   })
 

@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { atom } from 'nanostores'
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
+import { PANE_HIDDEN_ATTR } from '@/components/pane-shell/pane-visibility'
 import { createRendererLoopPauseController } from '@/lib/renderer-loop-pause'
 
 import { $terminalTakeover } from '../store'
@@ -102,6 +103,20 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
         return false
       }
 
+      // Tab stacks keep inactive panes mounted so they preserve their scroll
+      // state. The terminal itself is a fixed overlay outside that stack, so
+      // its slot can retain a normal rect while its owning tab is hidden.
+      // Treat that slot as zero-sized or xterm would visibly cover whichever
+      // sibling tab (Logs, Kanban, …) the user just selected.
+      if (slot.closest(`[${PANE_HIDDEN_ATTR}]`)) {
+        if (prev !== null) {
+          prev = null
+          setRect(null)
+        }
+
+        return false
+      }
+
       const r = slot.getBoundingClientRect()
       // floor top/left + ceil right/bottom: overlay always covers the slot's
       // full pixel footprint, so half-pixel rects can't leak page bg through.
@@ -171,7 +186,7 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
 
     for (let node: HTMLElement | null = slot; node; node = node.parentElement) {
       positionObserver?.observe(node, {
-        attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'data-state'],
+        attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'data-state', PANE_HIDDEN_ATTR],
         attributes: true,
         childList: true,
         subtree: true
