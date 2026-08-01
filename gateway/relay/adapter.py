@@ -748,6 +748,8 @@ class RelayAdapter(BasePlatformAdapter):
                     "member_id": member_id,
                     "role_ids": role_ids,
                     "permission_bits": permission_bits,
+                    "interaction_type": "component" if itype == 3 else "command" if itype == 2 else "other",
+                    "component_custom_id": str(data.get("custom_id") or "") if itype == 3 else "",
                 }
             },
         )

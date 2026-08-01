@@ -132,6 +132,8 @@ async def test_discord_interaction_routes_through_handle_message(adapter, monkey
         "member_id": "user-3",
         "role_ids": ["role-1", "role-2"],
         "permission_bits": "8",
+        "interaction_type": "command",
+        "component_custom_id": "",
     }
     # Scope captured so the agent's reply re-asserts scope_id for egress.
     assert adapter._scope_by_chat.get("chan-9") == "guild-7"
