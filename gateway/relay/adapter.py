@@ -718,13 +718,16 @@ class RelayAdapter(BasePlatformAdapter):
         )
         channel_id = str(payload.get("channel_id") or "")
         guild_id = payload.get("guild_id")  # real Discord interaction wire field
+        roles = member.get("roles") if isinstance(member, dict) else None
+        role_ids = [str(role) for role in roles] if isinstance(roles, list) else []
+        permissions = member.get("permissions") if isinstance(member, dict) else None
+        permission_bits = str(permissions) if isinstance(permissions, (str, int)) else ""
+        member_id = str(user.get("id")) if isinstance(user, dict) and user.get("id") else ""
         source = SessionSource(
             platform=Platform.RELAY,
             chat_id=channel_id,
             chat_type="channel" if guild_id else "dm",
-            user_id=str(user.get("id"))
-            if isinstance(user, dict) and user.get("id")
-            else None,
+            user_id=member_id or None,
             user_name=str(user.get("username"))
             if isinstance(user, dict) and user.get("username")
             else None,
@@ -732,8 +735,22 @@ class RelayAdapter(BasePlatformAdapter):
             if guild_id
             else None,  # Discord guild → generic scope slot
             message_id=str(payload.get("id")) if payload.get("id") else None,
+            delivered_via_upstream_relay=True,
         )
-        event = MessageEvent(text=text, message_type=message_type, source=source)
+        event = MessageEvent(
+            text=text,
+            message_type=message_type,
+            source=source,
+            message_id=source.message_id,
+            metadata={
+                "trusted_discord_interaction": {
+                    "guild_id": str(guild_id) if guild_id else "",
+                    "member_id": member_id,
+                    "role_ids": role_ids,
+                    "permission_bits": permission_bits,
+                }
+            },
+        )
         if itype == 3:
             # Phase 3: a component press whose custom_id is a Hermes prompt
             # token (hp1:<prompt_id>:<option_id>) becomes a STRUCTURED prompt

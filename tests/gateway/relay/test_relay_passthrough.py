@@ -105,7 +105,11 @@ async def test_discord_interaction_routes_through_handle_message(adapter, monkey
             "channel_id": "chan-9",
             "guild_id": "guild-7",
             "data": {"name": "summarize"},
-            "member": {"user": {"id": "user-3", "username": "ben"}},
+            "member": {
+                "user": {"id": "user-3", "username": "ben"},
+                "roles": ["role-1", "role-2"],
+                "permissions": "8",
+            },
         }
     )
     await stub.push_passthrough(fwd, buffer_id=None)
@@ -121,6 +125,14 @@ async def test_discord_interaction_routes_through_handle_message(adapter, monkey
     assert ev.source.scope_id == "guild-7"
     assert ev.source.user_id == "user-3"
     assert ev.source.chat_type == "channel"
+    assert ev.source.delivered_via_upstream_relay is True
+    assert ev.message_id == "interaction-1"
+    assert ev.metadata["trusted_discord_interaction"] == {
+        "guild_id": "guild-7",
+        "member_id": "user-3",
+        "role_ids": ["role-1", "role-2"],
+        "permission_bits": "8",
+    }
     # Scope captured so the agent's reply re-asserts scope_id for egress.
     assert adapter._scope_by_chat.get("chan-9") == "guild-7"
 
