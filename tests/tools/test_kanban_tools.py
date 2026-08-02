@@ -502,6 +502,132 @@ def test_comment_happy_path(worker_env):
         conn.close()
 
 
+def test_queri_cannot_comment_on_done_query_card(monkeypatch, tmp_path):
+    """Queri follow-ups must create a new card instead of mutating a done one."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    profile_home = home / "profiles" / "queri"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    conn = kb.connect(board="queris-query")
+    try:
+        tid = kb.create_task(conn, title="completed query", assignee="klerik")
+        assert kb.complete_task(conn, tid, summary="STATUS: ANSWERED")
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_comment({
+        "task_id": tid,
+        "board": "queris-query",
+        "body": "User refinement: narrow the answer.",
+    })
+    response = json.loads(out)
+
+    assert response.get("ok") is not True
+    assert "new follow-up card" in response["error"]
+    conn = kb.connect(board="queris-query")
+    try:
+        assert kb.list_comments(conn, tid) == []
+        assert [event.kind for event in kb.list_events(conn, tid)] == [
+            "created", "completed"
+        ]
+    finally:
+        conn.close()
+
+
+def test_queri_cannot_unblock_done_query_card(monkeypatch, tmp_path):
+    """Queri must not treat a completed query as blocked follow-up work."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    profile_home = home / "profiles" / "queri"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    conn = kb.connect(board="queris-query")
+    try:
+        tid = kb.create_task(conn, title="completed query", assignee="klerik")
+        assert kb.complete_task(conn, tid, summary="STATUS: ANSWERED")
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    response = json.loads(kt._handle_unblock({
+        "task_id": tid,
+        "board": "queris-query",
+    }))
+
+    assert response.get("ok") is not True
+    assert "new follow-up card" in response["error"]
+    conn = kb.connect(board="queris-query")
+    try:
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "done"
+    finally:
+        conn.close()
+
+
+def test_queri_can_comment_and_unblock_blocked_query_card(monkeypatch, tmp_path):
+    """The terminal guard must not break Queri's live blocked-card flow."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "queri")
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    conn = kb.connect(board="queris-query")
+    try:
+        tid = kb.create_task(conn, title="blocked query", assignee="klerik")
+        assert kb.block_task(conn, tid, reason="awaiting clarification")
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    comment = json.loads(kt._handle_comment({
+        "task_id": tid,
+        "board": "queris-query",
+        "body": "The user supplied the requested clarification.",
+    }))
+    unblock = json.loads(kt._handle_unblock({
+        "task_id": tid,
+        "board": "queris-query",
+    }))
+
+    assert comment["ok"] is True
+    assert unblock == {"ok": True, "task_id": tid, "status": "ready"}
+
+
+def test_non_queri_can_comment_on_done_card(worker_env):
+    """The Queri policy must not remove general terminal-card audit comments."""
+    from tools import kanban_tools as kt
+
+    assert json.loads(kt._handle_complete({"summary": "finished"}))["ok"]
+    comment = json.loads(kt._handle_comment({
+        "task_id": worker_env,
+        "body": "Operator audit note.",
+    }))
+
+    assert comment["ok"] is True
+
+
 def test_comment_ignores_caller_supplied_author(worker_env):
     """``args["author"]`` is no longer honored — the author is always
     derived from ``HERMES_PROFILE`` so a worker can't forge a comment

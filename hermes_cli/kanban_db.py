@@ -3846,7 +3846,12 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # ---------------------------------------------------------------------------
 
 def add_comment(
-    conn: sqlite3.Connection, task_id: str, author: str, body: str
+    conn: sqlite3.Connection,
+    task_id: str,
+    author: str,
+    body: str,
+    *,
+    reject_terminal: bool = False,
 ) -> int:
     if not body or not body.strip():
         raise ValueError("comment body is required")
@@ -3854,10 +3859,15 @@ def add_comment(
         raise ValueError("comment author is required")
     now = int(time.time())
     with write_txn(conn):
-        if not conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone():
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if task is None:
             raise ValueError(f"unknown task {task_id}")
+        if reject_terminal and task["status"] in {"done", "archived"}:
+            raise ValueError(
+                "task is terminal; create a new follow-up card instead"
+            )
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at) "
             "VALUES (?, ?, ?, ?)",

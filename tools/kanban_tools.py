@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -210,6 +211,30 @@ def _connect(board: Optional[str] = None):
     """
     from hermes_cli import kanban_db as kb
     return kb, kb.connect(board=board)
+
+
+def _kanban_actor_profile() -> str:
+    """Return the current actor's profile, including gateway profile homes."""
+    explicit_profile = os.environ.get("HERMES_PROFILE")
+    if explicit_profile:
+        return explicit_profile
+    try:
+        from hermes_constants import get_hermes_home
+
+        home = Path(get_hermes_home()).resolve()
+        if home.parent.name == "profiles":
+            return home.name
+    except OSError:
+        pass
+    return "worker"
+
+
+def _is_queri_query_board(kb, author: str, requested_board: Optional[str]) -> bool:
+    """Whether Queri is acting on its query board after board resolution."""
+    return (
+        author.casefold() == "queri"
+        and (requested_board or kb.get_current_board()) == "queris-query"
+    )
 
 
 _GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
@@ -953,12 +978,19 @@ def _handle_comment(args: dict, **kw) -> str:
     # the future-worker context with what reads as a system directive.
     # Cross-task commenting itself remains unrestricted (see #19713) —
     # comments are the deliberate handoff channel between tasks.
-    author = os.environ.get("HERMES_PROFILE") or "worker"
+    author = _kanban_actor_profile()
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
+            reject_terminal = _is_queri_query_board(kb, author, board)
+            cid = kb.add_comment(
+                conn,
+                tid,
+                author=author,
+                body=str(body),
+                reject_terminal=reject_terminal,
+            )
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()
@@ -1477,6 +1509,17 @@ def _handle_unblock(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            task = kb.get_task(conn, str(tid))
+            if (
+                _is_queri_query_board(
+                    kb, _kanban_actor_profile(), board
+                )
+                and task is not None
+                and task.status in {"done", "archived"}
+            ):
+                return tool_error(
+                    "task is terminal; create a new follow-up card instead"
+                )
             ok = kb.unblock_task(conn, str(tid))
             if not ok:
                 return tool_error(f"could not unblock {tid} (not blocked or unknown)")
